@@ -59,6 +59,13 @@
 #include <QMessageBox>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#ifdef Q_OS_ANDROID
+	#include "StelMovementMgr.hpp"
+	#include "StelObjectMgr.hpp"
+	#include <QGraphicsProxyWidget>
+	#include <QJniObject>
+	#include <QShortcut>
+#endif
 #ifdef Q_OS_WIN
 	#include <QPinchGesture>
 	#include <Windows.h>
@@ -702,6 +709,12 @@ StelMainView::StelMainView(QSettings* settings)
 	scene()->setItemIndexMethod(QGraphicsScene::NoIndex);
 	rootItem = new StelRootItem(this);
 
+#ifdef Q_OS_ANDROID
+	auto* back = new QShortcut(QKeySequence(Qt::Key_Back), this);
+	back->setAutoRepeat(false);
+	connect(back, &QShortcut::activated, this, &StelMainView::handleAndroidBack);
+#endif
+
 	// Workaround (see Bug #940638) Although we have already explicitly set
 	// LC_NUMERIC to "C" in main.cpp there seems to be a bug in OpenGL where
 	// it will silently reset LC_NUMERIC to the value of LC_ALL during OpenGL
@@ -715,6 +728,55 @@ StelMainView::StelMainView(QSettings* settings)
 
     setRenderHint(QPainter::Antialiasing);
 }
+
+#ifdef Q_OS_ANDROID
+void StelMainView::handleAndroidBack()
+{
+	QGraphicsWidget* window = scene()->activeWindow();
+	if (!window)
+	{
+		// Without an active window, try to deselect the currently selected object, if any exists
+		if (StelApp::isInitialized() && StelApp::getInstance().getStelObjectMgr().getWasSelected())
+		{
+			StelApp::getInstance().getCore()->getMovementMgr()->deselection();
+			thereWasAnEvent();
+			return;
+		}
+
+		// So there's no selected object, let's go through inactive but visible windows and close the topmost one.
+		// The rectangular query respects stacking order even with NoIndex; the all-items overload ignores its sort order in that mode.
+		for (auto* item : scene()->items(scene()->itemsBoundingRect(), Qt::IntersectsItemBoundingRect, Qt::DescendingOrder))
+		{
+			if (item->isWindow() && item->isVisible())
+			{
+				window = static_cast<QGraphicsWidget*>(item);
+				break;
+			}
+		}
+	}
+	if (window)
+	{
+		// Close the embedded dialog so its rejected/visibleChanged signals are emitted.
+		const auto proxy = qobject_cast<QGraphicsProxyWidget*>(window);
+		if (proxy && proxy->widget())
+			proxy->widget()->close();
+		else
+			window->close();
+		thereWasAnEvent();
+		return;
+	}
+
+	using Android = QNativeInterface::QAndroidApplication;
+	Android::runOnAndroidMainThread([]
+	{
+		if (Android::isActivityContext())
+		{
+			QJniObject activity = Android::context();
+			activity.callMethod<jboolean>("moveTaskToBack", "(Z)Z", jboolean(JNI_TRUE));
+		}
+	});
+}
+#endif
 
 void StelMainView::resizeEvent(QResizeEvent* event)
 {
